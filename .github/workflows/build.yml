@@ -63,7 +63,15 @@ jobs:
 
       - name: Build debug APK
         working-directory: proj
-        run: gradle :app:assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --stacktrace 2>&1 | tee build.log
+
+      - name: Show the real error
+        if: failure()
+        working-directory: proj
+        run: |
+          grep -n -B3 -A10 -E "FAILED:|error:|ld.lld|file not found|undefined" build.log | head -120
 
       - name: Inspect APK contents
         working-directory: proj

@@ -1,0 +1,77 @@
+name: Build ARCHI.AI PoC APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project.zip into ./proj
+        run: |
+          set -euxo pipefail
+          mkdir proj
+          unzip -q project.zip -d proj
+          ls -la proj
+
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+
+      - name: Fetch nodejs-mobile (Android prebuilt)
+        working-directory: proj
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          VER=24.20.0-0
+          gh release download "v$VER" -R digidem/nodejs-mobile -p 'nodejs-mobile-android-[0-9]*.zip' -O nm.zip
+          mkdir nm && unzip -q nm.zip -d nm
+          find nm -maxdepth 5 | sort | head -80
+          LIB=$(find nm -path '*arm64*' -name libnode.so | head -1); test -n "$LIB"
+          HDR=$(find nm -name node.h | head -1); test -n "$HDR"
+          mkdir -p app/src/main/jniLibs/arm64-v8a app/libnode/include/node
+          cp "$LIB" app/src/main/jniLibs/arm64-v8a/libnode.so
+          cp -r "$(dirname "$HDR")/." app/libnode/include/node/
+          ls -la app/src/main/jniLibs/arm64-v8a
+
+      - name: Install JS deps and bundle Baileys
+        working-directory: proj/nodejs-src
+        run: |
+          set -euxo pipefail
+          npm install --no-audit --no-fund
+          V=$(node -p "JSON.parse(require('fs').readFileSync('node_modules/@whiskeysockets/baileys/package.json')).version")
+          echo "BAILEYS VERSION: $V"
+          echo "export default '$V'" > version.js
+          npx esbuild main.js --bundle --platform=node --format=esm --target=node22 \
+            --outfile=../app/src/main/assets/nodejs/bundle.mjs \
+            --banner:js="import {createRequire as __cr} from 'module'; const require = __cr(import.meta.url);" \
+            --external:sharp --external:jimp --external:link-preview-js --external:audio-decode --external:pino-pretty
+          ls -la ../app/src/main/assets/nodejs/
+
+      - name: Smoke test bundle on desktop Node 22 (NOT Android)
+        working-directory: proj
+        run: node ci/smoke.mjs app/src/main/assets/nodejs/bundle.mjs
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+
+      - name: Build debug APK
+        working-directory: proj
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Inspect APK contents
+        working-directory: proj
+        run: |
+          APK=$(ls app/build/outputs/apk/debug/*.apk)
+          unzip -l "$APK" | grep -E 'libnode|libarchinode|bundle.mjs'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archi-poc-debug-apk
+          path: proj/app/build/outputs/apk/debug/*.apk
